@@ -72,7 +72,7 @@ class Exp_MultiLabeling(Exp_Basic):
         preds = torch.cat(preds, 0)
         trues = torch.cat(trues, 0)
         probs = torch.nn.functional.sigmoid(preds)
-        trues = trues.flatten().cpu().numpy()
+        trues = trues.cpu().numpy()
         err = self.mean_squared_error(probs.cpu().numpy(), trues)
 
         self.model.train()
@@ -175,7 +175,7 @@ class Exp_MultiLabeling(Exp_Basic):
         print('test shape:', preds.shape, trues.shape)
 
         probs = torch.nn.functional.sigmoid(preds)  # (total_samples, num_classes) est. prob. for each class and sample
-        trues = trues.flatten().cpu().numpy()
+        trues = trues.cpu().numpy()
         err = self.mean_squared_error(probs.cpu().numpy(), trues)
 
         # result save

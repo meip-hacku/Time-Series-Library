@@ -44,6 +44,9 @@ class Exp_MultiLabeling(Exp_Basic):
         criterion = nn.BCEWithLogitsLoss()
         return criterion
 
+    def mean_squared_error(self, preds, trues):
+        return np.mean(np.square(preds - trues))
+
     def vali(self, vali_data, vali_loader, criterion):
         total_loss = []
         preds = []
@@ -69,12 +72,11 @@ class Exp_MultiLabeling(Exp_Basic):
         preds = torch.cat(preds, 0)
         trues = torch.cat(trues, 0)
         probs = torch.nn.functional.sigmoid(preds)
-        predictions = torch.argmax(probs, dim=1).cpu().numpy()  # (total_samples,) int class index for each sample
         trues = trues.flatten().cpu().numpy()
-        accuracy = cal_accuracy(predictions, trues)
+        err = self.mean_squared_error(probs.cpu().numpy(), trues)
 
         self.model.train()
-        return total_loss, accuracy
+        return total_loss, err
 
     def train(self, setting):
         train_data, train_loader = self._get_data(flag='TRAIN')
@@ -112,7 +114,7 @@ class Exp_MultiLabeling(Exp_Basic):
                 loss = criterion(outputs, label.float().to(self.device))
                 train_loss.append(loss.item())
 
-                if (i + 1) % 100 == 0:
+                if (i + 1) % 10 == 0:
                     print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
                     speed = (time.time() - time_now) / iter_count
                     left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
@@ -126,13 +128,13 @@ class Exp_MultiLabeling(Exp_Basic):
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(train_loss)
-            vali_loss, val_accuracy = self.vali(vali_data, vali_loader, criterion)
-            test_loss, test_accuracy = self.vali(test_data, test_loader, criterion)
+            vali_loss, val_err = self.vali(vali_data, vali_loader, criterion)
+            test_loss, test_err = self.vali(test_data, test_loader, criterion)
 
             print(
-                "Epoch: {0}, Steps: {1} | Train Loss: {2:.3f} Vali Loss: {3:.3f} Vali Acc: {4:.3f} Test Loss: {5:.3f} Test Acc: {6:.3f}"
-                .format(epoch + 1, train_steps, train_loss, vali_loss, val_accuracy, test_loss, test_accuracy))
-            early_stopping(-val_accuracy, self.model, path)
+                "Epoch: {0}, Steps: {1} | Train Loss: {2:.3f} Vali Loss: {3:.3f} Vali MSE: {4:.3f} Test Loss: {5:.3f} Test MSE: {6:.3f}"
+                .format(epoch + 1, train_steps, train_loss, vali_loss, val_err, test_loss, test_err))
+            early_stopping(val_err, self.model, path)
             if early_stopping.early_stop:
                 print("Early stopping")
                 break
@@ -173,20 +175,19 @@ class Exp_MultiLabeling(Exp_Basic):
         print('test shape:', preds.shape, trues.shape)
 
         probs = torch.nn.functional.sigmoid(preds)  # (total_samples, num_classes) est. prob. for each class and sample
-        predictions = torch.argmax(probs, dim=1).cpu().numpy()  # (total_samples,) int class index for each sample
         trues = trues.flatten().cpu().numpy()
-        accuracy = cal_accuracy(predictions, trues)
+        err = self.mean_squared_error(probs.cpu().numpy(), trues)
 
         # result save
         folder_path = './results/' + setting + '/'
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
-        print('accuracy:{}'.format(accuracy))
-        file_name='result_multi_labeling.txt'
-        f = open(os.path.join(folder_path,file_name), 'a')
+        print('MSE: {}'.format(err))
+        file_name = 'result_multi_labeling.txt'
+        f = open(os.path.join(folder_path, file_name), 'a')
         f.write(setting + "  \n")
-        f.write('accuracy:{}'.format(accuracy))
+        f.write('MSE: {}'.format(err))
         f.write('\n')
         f.write('\n')
         f.close()

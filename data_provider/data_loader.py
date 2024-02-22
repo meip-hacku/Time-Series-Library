@@ -8,15 +8,117 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 from utils.timefeatures import time_features
 from data_provider.m4 import M4Dataset, M4Meta
-from data_provider.uea import subsample, interpolate_missing, Normalizer
+from data_provider.uea import subsample, interpolate_missing, Normalizer, padding_mask
 from sktime.datasets import load_from_tsfile_to_dataframe
 import warnings
+import random
+from typing import List, Tuple
 
 warnings.filterwarnings('ignore')
 
 
+class SquatLoader(Dataset):
+    def __init__(self, root_path, seed=42, flag="TRAIN"):
+        random.seed(seed)
+        self.flag = flag
+        self.root_path = root_path
+        data = self.load_all()
+        train_data, train_labels, test_data, test_labels = self.split_train_and_test(data)
+        assert len(train_data) > 0 and len(test_data) > 0, "No data loaded"
+        if flag == "TRAIN":
+            self.enc_in = train_data[0].shape[1]
+            self.max_seq_len = self.train_max_seq_len
+        elif flag == "TEST":
+            self.enc_in = test_data[0].shape[1]
+            self.max_seq_len = self.test_max_seq_len
+        self.train_data = train_data
+        self.train_labels = train_labels
+        self.test_data = test_data
+        self.test_labels = test_labels
+        self.class_names = ["knee down", "waist down", "chest angle", "chest up"]
+
+        if flag == "TRAIN":
+            print("train:", len(self.train_data), self.train_data[0].shape)
+        elif flag == "TEST":
+            print("test:", len(self.test_data), self.test_data[0].shape)
+        random.seed()  # 解除
+
+    def load_all(self) -> List[pd.DataFrame]:
+        ls = []
+        sub_folders = self.get_numbered_sub_folders()
+        for sub_folder in sub_folders:
+            sub_folder = str(sub_folder)
+            path = self.root_path + sub_folder
+            csvs = glob.glob(path + os.sep + "data_splitted_[1-5].csv")
+            for csv_path in csvs:
+                d = pd.read_csv(csv_path)
+                ls.append(d)
+
+        return ls
+
+    def get_numbered_sub_folders(self) -> List[str]:
+        files = os.listdir(self.root_path)
+        files = [f for f in files if os.path.isdir(f"{self.root_path}{f}")]
+        files = [int(f) for f in files if f.isdigit()]
+        return files
+
+    def get_label(self, d: pd.DataFrame) -> np.ndarray:
+        # 最後のタイムスタンプのラベルだけ見ておけば良い
+        label_str = str(d["label"].values[-1]).zfill(4)
+        label = np.array([
+            0 if label_str[0] == "0" else 1,
+            0 if label_str[1] == "0" else 1,
+            0 if label_str[2] == "0" else 1,
+            0 if label_str[3] == "0" else 1,
+        ])
+        return label
+
+    def split_train_and_test(self, data: List[pd.DataFrame], train_ratio=0.7) -> Tuple[List[np.ndarray], np.ndarray, List[np.ndarray], np.ndarray]:
+        train_size = int(len(data) * train_ratio)
+
+        # 並び替え
+        data = random.sample(data, len(data))
+        train_data = data[:train_size]
+        test_data = data[train_size:]
+
+        # ラベルだけ移しておく
+        train_labels = np.array([self.get_label(d) for d in train_data])
+        test_labels = np.array([self.get_label(d) for d in test_data])
+
+        # ラベルとタイムスタンプを排除してnp.ndarrayに変換
+        for i, d in enumerate(train_data):
+            train_data[i] = d.drop(["label", "timediff"], axis=1)
+            train_data[i] = train_data[i].values
+        for i, d in enumerate(test_data):
+            test_data[i] = d.drop(["label", "timediff"], axis=1)
+            test_data[i] = test_data[i].values
+
+        train_max_seq_len = max([d.shape[0] for d in train_data])  # 最大のシーケンス長を取得
+        test_max_seq_len = max([d.shape[0] for d in test_data])  # 最大のシーケンス長を取得
+        self.train_max_seq_len = train_max_seq_len
+        self.test_max_seq_len = test_max_seq_len
+
+        return train_data, train_labels, test_data, test_labels
+
+    def __len__(self):
+        if self.flag == "TRAIN":
+            return len(self.train_data)
+        elif (self.flag == 'TEST'):
+            return len(self.test_data)
+        else:
+            return len(self.train_data)
+
+    def __getitem__(self, index):
+        if self.flag == "TRAIN":
+            return torch.from_numpy(self.train_data[index]), torch.from_numpy(self.train_labels[index])
+        elif (self.flag == 'TEST'):
+            return torch.from_numpy(self.test_data[index]), torch.from_numpy(self.test_labels[index])
+        else:
+            return torch.from_numpy(self.train_data[index]), torch.from_numpy(self.train_labels[index])
+
+
 class Dataset_ETT_hour(Dataset):
-    def __init__(self, root_path, flag='train', size=None,
+    def __init__(self, root_path, flag='TRAIN', size=None,
                  features='S', data_path='ETTh1.csv',
                  target='OT', scale=True, timeenc=0, freq='h', seasonal_patterns=None):
         # size [seq_len, label_len, pred_len]
@@ -104,7 +206,7 @@ class Dataset_ETT_hour(Dataset):
 
 
 class Dataset_ETT_minute(Dataset):
-    def __init__(self, root_path, flag='train', size=None,
+    def __init__(self, root_path, flag='TRAIN', size=None,
                  features='S', data_path='ETTm1.csv',
                  target='OT', scale=True, timeenc=0, freq='t', seasonal_patterns=None):
         # size [seq_len, label_len, pred_len]
@@ -118,8 +220,8 @@ class Dataset_ETT_minute(Dataset):
             self.label_len = size[1]
             self.pred_len = size[2]
         # init
-        assert flag in ['train', 'test', 'val']
-        type_map = {'train': 0, 'val': 1, 'test': 2}
+        assert flag in ['TRAIN', 'TEST', 'val']
+        type_map = {'TRAIN': 0, 'val': 1, 'TEST': 2}
         self.set_type = type_map[flag]
 
         self.features = features
@@ -194,7 +296,7 @@ class Dataset_ETT_minute(Dataset):
 
 
 class Dataset_Custom(Dataset):
-    def __init__(self, root_path, flag='train', size=None,
+    def __init__(self, root_path, flag='TRAIN', size=None,
                  features='S', data_path='ETTh1.csv',
                  target='OT', scale=True, timeenc=0, freq='h', seasonal_patterns=None):
         # size [seq_len, label_len, pred_len]
@@ -208,8 +310,8 @@ class Dataset_Custom(Dataset):
             self.label_len = size[1]
             self.pred_len = size[2]
         # init
-        assert flag in ['train', 'test', 'val']
-        type_map = {'train': 0, 'val': 1, 'test': 2}
+        assert flag in ['TRAIN', 'TEST', 'val']
+        type_map = {'TRAIN': 0, 'val': 1, 'TEST': 2}
         self.set_type = type_map[flag]
 
         self.features = features
@@ -318,7 +420,7 @@ class Dataset_M4(Dataset):
 
     def __read_data__(self):
         # M4Dataset.initialize()
-        if self.flag == 'train':
+        if self.flag == 'TRAIN':
             dataset = M4Dataset.load(training=True, dataset_file=self.root_path)
         else:
             dataset = M4Dataset.load(training=False, dataset_file=self.root_path)
@@ -371,7 +473,7 @@ class Dataset_M4(Dataset):
 
 
 class PSMSegLoader(Dataset):
-    def __init__(self, root_path, win_size, step=1, flag="train"):
+    def __init__(self, root_path, win_size, step=1, flag="TRAIN"):
         self.flag = flag
         self.step = step
         self.win_size = win_size
@@ -393,22 +495,22 @@ class PSMSegLoader(Dataset):
         print("train:", self.train.shape)
 
     def __len__(self):
-        if self.flag == "train":
+        if self.flag == "TRAIN":
             return (self.train.shape[0] - self.win_size) // self.step + 1
         elif (self.flag == 'val'):
             return (self.val.shape[0] - self.win_size) // self.step + 1
-        elif (self.flag == 'test'):
+        elif (self.flag == 'TEST'):
             return (self.test.shape[0] - self.win_size) // self.step + 1
         else:
             return (self.test.shape[0] - self.win_size) // self.win_size + 1
 
     def __getitem__(self, index):
         index = index * self.step
-        if self.flag == "train":
+        if self.flag == "TRAIN":
             return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
         elif (self.flag == 'val'):
             return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.flag == 'test'):
+        elif (self.flag == 'TEST'):
             return np.float32(self.test[index:index + self.win_size]), np.float32(
                 self.test_labels[index:index + self.win_size])
         else:
@@ -418,7 +520,7 @@ class PSMSegLoader(Dataset):
 
 
 class MSLSegLoader(Dataset):
-    def __init__(self, root_path, win_size, step=1, flag="train"):
+    def __init__(self, root_path, win_size, step=1, flag="TRAIN"):
         self.flag = flag
         self.step = step
         self.win_size = win_size
@@ -436,22 +538,22 @@ class MSLSegLoader(Dataset):
         print("train:", self.train.shape)
 
     def __len__(self):
-        if self.flag == "train":
+        if self.flag == "TRAIN":
             return (self.train.shape[0] - self.win_size) // self.step + 1
         elif (self.flag == 'val'):
             return (self.val.shape[0] - self.win_size) // self.step + 1
-        elif (self.flag == 'test'):
+        elif (self.flag == 'TEST'):
             return (self.test.shape[0] - self.win_size) // self.step + 1
         else:
             return (self.test.shape[0] - self.win_size) // self.win_size + 1
 
     def __getitem__(self, index):
         index = index * self.step
-        if self.flag == "train":
+        if self.flag == "TRAIN":
             return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
         elif (self.flag == 'val'):
             return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.flag == 'test'):
+        elif (self.flag == 'TEST'):
             return np.float32(self.test[index:index + self.win_size]), np.float32(
                 self.test_labels[index:index + self.win_size])
         else:
@@ -461,7 +563,7 @@ class MSLSegLoader(Dataset):
 
 
 class SMAPSegLoader(Dataset):
-    def __init__(self, root_path, win_size, step=1, flag="train"):
+    def __init__(self, root_path, win_size, step=1, flag="TRAIN"):
         self.flag = flag
         self.step = step
         self.win_size = win_size
@@ -480,22 +582,22 @@ class SMAPSegLoader(Dataset):
 
     def __len__(self):
 
-        if self.flag == "train":
+        if self.flag == "TRAIN":
             return (self.train.shape[0] - self.win_size) // self.step + 1
         elif (self.flag == 'val'):
             return (self.val.shape[0] - self.win_size) // self.step + 1
-        elif (self.flag == 'test'):
+        elif (self.flag == 'TEST'):
             return (self.test.shape[0] - self.win_size) // self.step + 1
         else:
             return (self.test.shape[0] - self.win_size) // self.win_size + 1
 
     def __getitem__(self, index):
         index = index * self.step
-        if self.flag == "train":
+        if self.flag == "TRAIN":
             return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
         elif (self.flag == 'val'):
             return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.flag == 'test'):
+        elif (self.flag == 'TEST'):
             return np.float32(self.test[index:index + self.win_size]), np.float32(
                 self.test_labels[index:index + self.win_size])
         else:
@@ -505,7 +607,7 @@ class SMAPSegLoader(Dataset):
 
 
 class SMDSegLoader(Dataset):
-    def __init__(self, root_path, win_size, step=100, flag="train"):
+    def __init__(self, root_path, win_size, step=100, flag="TRAIN"):
         self.flag = flag
         self.step = step
         self.win_size = win_size
@@ -521,22 +623,22 @@ class SMDSegLoader(Dataset):
         self.test_labels = np.load(os.path.join(root_path, "SMD_test_label.npy"))
 
     def __len__(self):
-        if self.flag == "train":
+        if self.flag == "TRAIN":
             return (self.train.shape[0] - self.win_size) // self.step + 1
         elif (self.flag == 'val'):
             return (self.val.shape[0] - self.win_size) // self.step + 1
-        elif (self.flag == 'test'):
+        elif (self.flag == 'TEST'):
             return (self.test.shape[0] - self.win_size) // self.step + 1
         else:
             return (self.test.shape[0] - self.win_size) // self.win_size + 1
 
     def __getitem__(self, index):
         index = index * self.step
-        if self.flag == "train":
+        if self.flag == "TRAIN":
             return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
         elif (self.flag == 'val'):
             return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.flag == 'test'):
+        elif (self.flag == 'TEST'):
             return np.float32(self.test[index:index + self.win_size]), np.float32(
                 self.test_labels[index:index + self.win_size])
         else:
@@ -546,7 +648,7 @@ class SMDSegLoader(Dataset):
 
 
 class SWATSegLoader(Dataset):
-    def __init__(self, root_path, win_size, step=1, flag="train"):
+    def __init__(self, root_path, win_size, step=1, flag="TRAIN"):
         self.flag = flag
         self.step = step
         self.win_size = win_size
@@ -573,22 +675,22 @@ class SWATSegLoader(Dataset):
         """
         Number of images in the object dataset.
         """
-        if self.flag == "train":
+        if self.flag == "TRAIN":
             return (self.train.shape[0] - self.win_size) // self.step + 1
         elif (self.flag == 'val'):
             return (self.val.shape[0] - self.win_size) // self.step + 1
-        elif (self.flag == 'test'):
+        elif (self.flag == 'TEST'):
             return (self.test.shape[0] - self.win_size) // self.step + 1
         else:
             return (self.test.shape[0] - self.win_size) // self.win_size + 1
 
     def __getitem__(self, index):
         index = index * self.step
-        if self.flag == "train":
+        if self.flag == "TRAIN":
             return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
         elif (self.flag == 'val'):
             return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
-        elif (self.flag == 'test'):
+        elif (self.flag == 'TEST'):
             return np.float32(self.test[index:index + self.win_size]), np.float32(
                 self.test_labels[index:index + self.win_size])
         else:

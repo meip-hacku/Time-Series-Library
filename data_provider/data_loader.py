@@ -49,7 +49,7 @@ class SquatLoader(Dataset):
         for sub_folder in sub_folders:
             sub_folder = str(sub_folder)
             path = self.root_path + sub_folder
-            csvs = glob.glob(path + os.sep + "data_splitted_[1-5].csv")
+            csvs = glob.glob(path + os.sep + "features_[1-5].csv")
             for csv_path in csvs:
                 d = pd.read_csv(csv_path)
                 ls.append(d)
@@ -87,10 +87,10 @@ class SquatLoader(Dataset):
 
         # ラベルとタイムスタンプを排除してnp.ndarrayに変換
         for i, d in enumerate(train_data):
-            train_data[i] = d.drop(["label", "timediff"], axis=1)
+            train_data[i] = d.drop(["label"], axis=1)
             train_data[i] = train_data[i].values
         for i, d in enumerate(test_data):
-            test_data[i] = d.drop(["label", "timediff"], axis=1)
+            test_data[i] = d.drop(["label"], axis=1)
             test_data[i] = test_data[i].values
 
         train_max_seq_len = max([d.shape[0] for d in train_data])  # 最大のシーケンス長を取得

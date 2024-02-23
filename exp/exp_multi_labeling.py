@@ -1,6 +1,6 @@
 from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
-from utils.tools import EarlyStopping, adjust_learning_rate, cal_accuracy
+from utils.tools import EarlyStopping, adjust_learning_rate
 import torch
 import torch.nn as nn
 from torch import optim
@@ -47,6 +47,10 @@ class Exp_MultiLabeling(Exp_Basic):
     def mean_squared_error(self, preds, trues):
         return np.mean(np.square(preds - trues))
 
+    def mean_squared_error_with_threshold(self, preds, trues, threshold=0.5):
+        preds = preds > threshold
+        return np.mean(np.square(preds - trues))
+
     def vali(self, vali_data, vali_loader, criterion):
         total_loss = []
         preds = []
@@ -74,9 +78,10 @@ class Exp_MultiLabeling(Exp_Basic):
         probs = torch.nn.functional.sigmoid(preds)
         trues = trues.cpu().numpy()
         err = self.mean_squared_error(probs.cpu().numpy(), trues)
+        err2 = self.mean_squared_error_with_threshold(probs.cpu().numpy(), trues)
 
         self.model.train()
-        return total_loss, err
+        return total_loss, err, err2
 
     def train(self, setting):
         train_data, train_loader = self._get_data(flag='TRAIN')
@@ -128,12 +133,22 @@ class Exp_MultiLabeling(Exp_Basic):
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(train_loss)
-            vali_loss, val_err = self.vali(vali_data, vali_loader, criterion)
-            test_loss, test_err = self.vali(test_data, test_loader, criterion)
+            vali_loss, val_err, val_err2 = self.vali(vali_data, vali_loader, criterion)
+            test_loss, test_err, test_err2 = self.vali(test_data, test_loader, criterion)
 
-            print(
-                "Epoch: {0}, Steps: {1} | Train Loss: {2:.3f} Vali Loss: {3:.3f} Vali MSE: {4:.3f} Test Loss: {5:.3f} Test MSE: {6:.3f}"
-                .format(epoch + 1, train_steps, train_loss, vali_loss, val_err, test_loss, test_err))
+            print("""
+Epoch: {0}, Steps: {1}
+Train
+    Loss: {2:.3f}
+Validation
+    Loss: {3:.3f}
+    MSE: {4:.3f}
+    MSE2: {5:.3f}
+Test
+    Loss: {6:.3f}
+    MSE: {7:.3f}
+    MSE2: {8:.3f}
+""".format(epoch + 1, train_steps, train_loss, vali_loss, val_err, val_err2, test_loss, test_err, test_err2))
             early_stopping(val_err, self.model, path)
             if early_stopping.early_stop:
                 print("Early stopping")
@@ -177,6 +192,7 @@ class Exp_MultiLabeling(Exp_Basic):
         probs = torch.nn.functional.sigmoid(preds)  # (total_samples, num_classes) est. prob. for each class and sample
         trues = trues.cpu().numpy()
         err = self.mean_squared_error(probs.cpu().numpy(), trues)
+        err2 = self.mean_squared_error_with_threshold(probs.cpu().numpy(), trues)
 
         # result save
         folder_path = './results/' + setting + '/'
@@ -184,10 +200,12 @@ class Exp_MultiLabeling(Exp_Basic):
             os.makedirs(folder_path)
 
         print('MSE: {}'.format(err))
+        print('MSE2: {}'.format(err2))
         file_name = 'result_multi_labeling.txt'
         f = open(os.path.join(folder_path, file_name), 'a')
         f.write(setting + "  \n")
         f.write('MSE: {}'.format(err))
+        f.write('MSE2: {}'.format(err2))
         f.write('\n')
         f.write('\n')
         f.close()
